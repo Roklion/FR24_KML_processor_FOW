@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>KML Processor</title>
+  <script src="https://cdn.jsdelivr.net/npm/turf"></script>
+</head>
+<body>
+  <h1>KML Input Files</h1>
+  <div id="dropZone" style="border: 2px dashed #ccc; padding:20px;">
+    <p>Drag and drop KML files here for processing</p>
+  </div>
+  <ul id="knotsList"></ul>
+  <script>
+    function calculateHaversineDistance(coord1, coord2) {
+      const [lon1, lat1] = coord1;
+      const [lon2, lat2] = coord2;
+      const earthRadius = 6371000; // Radius of Earth in meters
+      const dLat = (lat2 - lat1) * (Math.PI / 180);
+      const dLon = (lon2 - lon1) * (Math.PI / 180);
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const distance = earthRadius * c;
+      return distance;
+    }
+	
+    // Function to handle dropped files
+    async function handleFileDrop(event) {
+      event.preventDefault();
+
+      const files = event.dataTransfer.files;
+      const dropZone = document.getElementById("dropZone");
+      const knotsList = document.getElementById("knotsList");
+
+      dropZone.innerHTML = "Processing...";
+	  let count = 0;
+      try {
+        for (const file of files) {
+          const kmlText = await readFileAsText(file);
+          const geojson = new DOMParser().parseFromString(kmlText, "text/xml");
+
+          // Process the KML file
+          await processKML(geojson, file.name);
+		  count = count + 1
+		  console.log(`Processed ${count} files, ${file.name}`);
+		  
+          // Display file processing result
+          const listItem = document.createElement("li");
+          listItem.textContent = `${count}.Processed: ${file.name}`;
+          knotsList.appendChild(listItem);
+
+  		  await wait(200);
+        }
+      } catch (error) {
+        console.error("Error while handling file drop:", error);
+      }
+
+      dropZone.innerHTML = "<p>Drag and drop multiple KML files here</p>";
+    }
+  
+    // Function to read a file as text using Promise
+    function readFileAsText(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = event => resolve(event.target.result);
+        reader.onerror = reject;
+        reader.readAsText(file);
+      });
+    }
+
+    function processKML(geojson, filename) {
+	  const folders = geojson.querySelectorAll("Folder");
+	  const folderMap = {};
+
+      folders.forEach(folder => {
+	    const folderName = folder.querySelector("name").textContent;
+		folderMap[folderName] = folder;
+	  });
+		
+      // Remove the "Route" folder before processing knots
+      if (folderMap["Route"]) {
+	    const routeFolder = folderMap["Route"];
+		routeFolder.parentNode.removeChild(routeFolder);
+      }
+
+      const placemarks = geojson.querySelectorAll("Placemark");
+      const updatedPlacemarks = []; // For modified KML
+
+      let previousCoordinates = null;
+
+      placemarks.forEach((placemark, index) => {
+        const parentFolderName = placemark.parentNode.querySelector("name").textContent;
+        const name = placemark.querySelector("name").textContent;
+        const coordinates = placemark.querySelector("coordinates").textContent.trim();
+        const [longitude, latitude] = coordinates.split(",").map(coord => parseFloat(coord));
+
+        // Calculate distance
+        let distanceMeters = 0;
+        if (previousCoordinates !== null) {
+          distanceMeters = calculateHaversineDistance(previousCoordinates, [longitude, latitude]);
+      
+          // Add intermediate knots if needed
+          const numIntermediateKnots = Math.ceil(distanceMeters / 1000);
+          for (let i = 1; i <= numIntermediateKnots; i++) {
+            const fraction = i / (numIntermediateKnots);
+            const intermediateLongitude = previousCoordinates[0] + (longitude - previousCoordinates[0]) * fraction;
+            const intermediateLatitude = previousCoordinates[1] + (latitude - previousCoordinates[1]) * fraction;
+			
+			updatedPlacemarks.push(`${intermediateLongitude},${intermediateLatitude}`);
+          }
+        } else {
+		  updatedPlacemarks.push(`${longitude},${latitude}`);
+		}
+		
+		previousCoordinates = [longitude, latitude];  
+      });
+
+      // Generate and export modified KML
+      const updatedKML = `<?xml version="1.0" encoding="UTF-8"?>
+        <kml xmlns="http://www.opengis.net/kml/2.2">
+          <Document>
+		    <Placemark>
+			  <name>Simple Knot Line</name>
+			  <LineString>
+                <coordinates>${updatedPlacemarks.join(" ")}</coordinates>
+		      </LineString>
+			</Placemark>
+          </Document>
+        </kml>`;
+
+      const modifiedFilename = `modified_${filename}`;
+      addIntermediateKnotsAndExport(updatedKML, modifiedFilename);
+    }
+
+    function addIntermediateKnotsAndExport(updatedKMLText, filename) {
+      // Create a Blob containing the KML data
+      const blob = new Blob([updatedKMLText], { type: "text/xml" });
+
+      // Create a link element to download the modified KML file
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+
+      // Programmatically click the link to trigger the download
+      link.click();
+    }
+
+  // Function to introduce a delay using a Promise
+  function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+  const dropZone = document.getElementById("dropZone");
+  dropZone.addEventListener("dragover", event => {
+    event.preventDefault();
+    dropZone.style.background = "#f0f0f0";
+  });
+
+  dropZone.addEventListener("dragleave", event => {
+    event.preventDefault();
+    dropZone.style.background = "none";
+  });
+
+  dropZone.addEventListener("drop", handleFileDrop);
+  </script>
+</body>
+</html>
