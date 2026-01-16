@@ -1,5 +1,4 @@
-The script was taken from somewhere on the internet (cannot find original source any more) and modified to suit my personal use.
-If you know the original auther, please let me know so I can add reference.
+The script was created based on https://sspai.com/post/38942
 
 Instruction: 
 - Open directly using a browser (I've only tested Chrome)
