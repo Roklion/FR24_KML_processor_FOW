@@ -2,7 +2,6 @@
 <html>
 <head>
   <title>KML Processor</title>
-  <script src="https://cdn.jsdelivr.net/npm/turf"></script>
 </head>
 <body>
   <h1>KML Input Files</h1>
@@ -11,19 +10,64 @@
   </div>
   <ul id="knotsList"></ul>
   <script>
+    const SAMPLE_INTERVAL_METERS = 1000;
+
     function calculateHaversineDistance(coord1, coord2) {
       const [lon1, lat1] = coord1;
       const [lon2, lat2] = coord2;
       const earthRadius = 6371000; // Radius of Earth in meters
       const dLat = (lat2 - lat1) * (Math.PI / 180);
       const dLon = (lon2 - lon1) * (Math.PI / 180);
-      const a =
+      const a = Math.min(1,
         Math.sin(dLat / 2) * Math.sin(dLat / 2) +
         Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        Math.sin(dLon / 2) * Math.sin(dLon / 2)
+      );
       const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
       const distance = earthRadius * c;
       return distance;
+    }
+
+    function getElementsByLocalName(node, localName) {
+      return Array.from(node.getElementsByTagNameNS("*", localName));
+    }
+
+    function getDirectChildText(node, localName) {
+      const child = Array.from(node.childNodes).find(
+        element => element.nodeType === 1 && element.localName === localName
+      );
+      return child ? child.textContent.trim() : "";
+    }
+
+    function parseCoordinateText(coordinatesText) {
+      const points = [];
+      const invalidTokens = [];
+      const tokens = coordinatesText.trim().split(/\s+/).filter(Boolean);
+
+      tokens.forEach((token, index) => {
+        const fields = token.split(",");
+        const longitude = Number(fields[0]);
+        const latitude = Number(fields[1]);
+
+        if (
+          fields.length < 2 ||
+          !Number.isFinite(longitude) ||
+          !Number.isFinite(latitude) ||
+          longitude < -180 ||
+          longitude > 180 ||
+          latitude < -90 ||
+          latitude > 90
+        ) {
+          invalidTokens.push({ token, index });
+          return;
+        }
+
+        // Altitude, when present, is intentionally ignored. The output is a
+        // 2D ground track unless altitude support is added later.
+        points.push([longitude, latitude]);
+      });
+
+      return { points, invalidTokens };
     }
 
     // Return a point at fraction t along the great-circle route between two
@@ -53,6 +97,13 @@
         return coord2;
       }
 
+      // There is no unique shortest great-circle route between antipodal
+      // points. Treating the later point as invalid is safer for a flight
+      // track than generating an arbitrary or unstable route.
+      if (Math.PI - angularDistance < 1e-10) {
+        return null;
+      }
+
       const sinAngularDistance = Math.sin(angularDistance);
       const weight1 = Math.sin((1 - t) * angularDistance) / sinAngularDistance;
       const weight2 = Math.sin(t * angularDistance) / sinAngularDistance;
@@ -66,6 +117,95 @@
 
       return [toDegrees(longitude), toDegrees(latitude)];
     }
+
+    function addPointToSegments(segments, point) {
+      const currentSegment = segments[segments.length - 1];
+
+      if (currentSegment.length === 0) {
+        currentSegment.push(point);
+        return;
+      }
+
+      const previousPoint = currentSegment[currentSegment.length - 1];
+      const longitudeDifference = point[0] - previousPoint[0];
+
+      if (Math.abs(longitudeDifference) <= 180) {
+        currentSegment.push(point);
+        return;
+      }
+
+      // A KML LineString still draws a long segment between +180 and -180.
+      // End the current line at the antimeridian and start a new line on the
+      // opposite representation of the same boundary point.
+      const unwrappedLongitude = longitudeDifference > 0
+        ? point[0] - 360
+        : point[0] + 360;
+      const boundaryLongitude = unwrappedLongitude > previousPoint[0] ? 180 : -180;
+      const fraction =
+        (boundaryLongitude - previousPoint[0]) /
+        (unwrappedLongitude - previousPoint[0]);
+      const crossingPoint = interpolateGreatCircle(
+        previousPoint,
+        point,
+        Math.max(0, Math.min(1, fraction))
+      );
+
+      if (!crossingPoint) {
+        return;
+      }
+
+      crossingPoint[0] = boundaryLongitude;
+      currentSegment.push(crossingPoint);
+      segments.push([
+        [-boundaryLongitude, crossingPoint[1]],
+        point
+      ]);
+    }
+
+    function buildInterpolatedSegments(coordinates) {
+      const segments = [[]];
+      let previousCoordinates = coordinates[0];
+      let removedAntipodalPoints = 0;
+
+      addPointToSegments(segments, previousCoordinates);
+
+      for (let index = 1; index < coordinates.length; index++) {
+        const currentCoordinates = coordinates[index];
+        const distanceMeters = calculateHaversineDistance(
+          previousCoordinates,
+          currentCoordinates
+        );
+        const numSegmentPoints = Math.ceil(
+          distanceMeters / SAMPLE_INTERVAL_METERS
+        );
+        let skippedCurrentPoint = false;
+
+        for (let i = 1; i <= numSegmentPoints; i++) {
+          const fraction = i / numSegmentPoints;
+          const interpolatedPoint = interpolateGreatCircle(
+            previousCoordinates,
+            currentCoordinates,
+            fraction
+          );
+
+          if (!interpolatedPoint) {
+            skippedCurrentPoint = true;
+            break;
+          }
+
+          addPointToSegments(segments, interpolatedPoint);
+        }
+
+        if (skippedCurrentPoint) {
+          removedAntipodalPoints++;
+          continue;
+        }
+
+        previousCoordinates = currentCoordinates;
+      }
+
+      return { segments, removedAntipodalPoints };
+    }
 	
     // Function to handle dropped files
     async function handleFileDrop(event) {
@@ -76,29 +216,51 @@
       const knotsList = document.getElementById("knotsList");
 
       dropZone.innerHTML = "Processing...";
-	  let count = 0;
-      try {
-        for (const file of files) {
+      knotsList.innerHTML = "";
+      let count = 0;
+
+      for (const file of files) {
+        try {
           const kmlText = await readFileAsText(file);
-          const geojson = new DOMParser().parseFromString(kmlText, "text/xml");
+          const xmlDocument = new DOMParser().parseFromString(kmlText, "text/xml");
 
-          // Process the KML file
-          await processKML(geojson, file.name);
-		  count = count + 1
-		  console.log(`Processed ${count} files, ${file.name}`);
-		  
-          // Display file processing result
-          const listItem = document.createElement("li");
-          listItem.textContent = `${count}.Processed: ${file.name}`;
-          knotsList.appendChild(listItem);
+          const result = processKML(xmlDocument, file.name);
+          count++;
 
-  		  await wait(200);
+          let message = `${count}. Processed: ${file.name}`;
+          if (result.removedInvalidPoints > 0) {
+            message += ` (removed ${result.removedInvalidPoints} invalid point(s))`;
+          }
+          if (result.removedAntipodalPoints > 0) {
+            message += ` (removed ${result.removedAntipodalPoints} unstable point(s))`;
+          }
+          addStatusMessage(message, false);
+
+          if (result.issues.length > 0) {
+            addStatusMessage(`Warning: ${file.name} — ${result.issues[0]}`, false, true);
+          }
+
+          result.issues.forEach(issue => console.warn(`${file.name}: ${issue}`));
+          await wait(200);
+        } catch (error) {
+          console.error(`Error while processing ${file.name}:`, error);
+          addStatusMessage(`Error: ${file.name} — ${error.message}`, true);
         }
-      } catch (error) {
-        console.error("Error while handling file drop:", error);
       }
 
       dropZone.innerHTML = "<p>Drag and drop multiple KML files here</p>";
+      dropZone.style.background = "none";
+    }
+
+    function addStatusMessage(message, isError, isWarning) {
+      const listItem = document.createElement("li");
+      listItem.textContent = message;
+      if (isError) {
+        listItem.style.color = "#b00020";
+      } else if (isWarning) {
+        listItem.style.color = "#8a5a00";
+      }
+      document.getElementById("knotsList").appendChild(listItem);
     }
   
     // Function to read a file as text using Promise
@@ -111,86 +273,140 @@
       });
     }
 
-    function processKML(geojson, filename) {
-	  const folders = geojson.querySelectorAll("Folder");
-	  const folderMap = {};
+    function processKML(xmlDocument, filename) {
+      const rootName = xmlDocument.documentElement
+        ? xmlDocument.documentElement.localName
+        : "";
+      const parserErrors = getElementsByLocalName(xmlDocument, "parsererror");
 
-      folders.forEach(folder => {
-	    const folderName = folder.querySelector("name").textContent;
-		folderMap[folderName] = folder;
-	  });
-		
-      // Remove the "Route" folder before processing knots
-      if (folderMap["Route"]) {
-	    const routeFolder = folderMap["Route"];
-		routeFolder.parentNode.removeChild(routeFolder);
+      if (rootName === "parsererror" || parserErrors.length > 0) {
+        throw new Error("The file is not valid XML/KML.");
       }
 
-      const placemarks = geojson.querySelectorAll("Placemark");
-      const updatedPlacemarks = []; // For modified KML
+      const issues = [];
+      let removedInvalidPoints = 0;
+      let skippedPlacemarks = 0;
+      const folders = getElementsByLocalName(xmlDocument, "Folder");
 
-      let previousCoordinates = null;
+      // FlightRadar24 exports the sampled flight path in Trail and a
+      // simplified route in Route. Remove every Route folder before reading
+      // placemarks so Route does not get mixed into the observed track.
+      folders
+        .filter(folder => getDirectChildText(folder, "name") === "Route")
+        .forEach(routeFolder => routeFolder.remove());
 
-      placemarks.forEach((placemark, index) => {
-        const parentFolderName = placemark.parentNode.querySelector("name").textContent;
-        const name = placemark.querySelector("name").textContent;
-        const coordinates = placemark.querySelector("coordinates").textContent.trim();
-        const [longitude, latitude] = coordinates.split(",").map(coord => parseFloat(coord));
+      const placemarks = getElementsByLocalName(xmlDocument, "Placemark");
+      const coordinates = [];
 
-        // Calculate distance
-        let distanceMeters = 0;
-        if (previousCoordinates !== null) {
-          distanceMeters = calculateHaversineDistance(previousCoordinates, [longitude, latitude]);
-      
-          // Add points at approximately 1 km intervals along the
-          // great-circle route between the two coordinates.
-          const numIntermediateKnots = Math.ceil(distanceMeters / 1000);
-          for (let i = 1; i <= numIntermediateKnots; i++) {
-            const fraction = i / (numIntermediateKnots);
-            const [intermediateLongitude, intermediateLatitude] =
-              interpolateGreatCircle(
-                previousCoordinates,
-                [longitude, latitude],
-                fraction
+      placemarks.forEach((placemark, placemarkIndex) => {
+        const coordinateElements = getElementsByLocalName(placemark, "coordinates");
+
+        if (coordinateElements.length === 0) {
+          skippedPlacemarks++;
+          issues.push(`Placemark ${placemarkIndex + 1} has no coordinates.`);
+          return;
+        }
+
+        let validPointsInPlacemark = 0;
+        coordinateElements.forEach(coordinatesElement => {
+          const parsed = parseCoordinateText(coordinatesElement.textContent);
+
+          parsed.invalidTokens.forEach(invalid => {
+            removedInvalidPoints++;
+            if (issues.length < 10) {
+              issues.push(
+                `Placemark ${placemarkIndex + 1} has an invalid coordinate ` +
+                `(${invalid.token}). That point was removed.`
               );
+            }
+          });
 
-            updatedPlacemarks.push(`${intermediateLongitude},${intermediateLatitude}`);
+          parsed.points.forEach(point => {
+            const previousPoint = coordinates[coordinates.length - 1];
+            const isDuplicate = previousPoint &&
+              previousPoint[0] === point[0] &&
+              previousPoint[1] === point[1];
+
+            if (!isDuplicate) {
+              coordinates.push(point);
+              validPointsInPlacemark++;
+            }
+          });
+        });
+
+        if (validPointsInPlacemark === 0) {
+          skippedPlacemarks++;
+          if (issues.length < 10) {
+            issues.push(`Placemark ${placemarkIndex + 1} has no valid coordinates.`);
           }
-        } else {
-		  updatedPlacemarks.push(`${longitude},${latitude}`);
-		}
-		
-		previousCoordinates = [longitude, latitude];  
+        }
       });
 
-      // Generate and export modified KML
+      if (coordinates.length < 2) {
+        throw new Error("The file does not contain at least two valid path points.");
+      }
+
+      const interpolated = buildInterpolatedSegments(coordinates);
+      const usableSegments = interpolated.segments.filter(
+        segment => segment.length >= 2
+      );
+
+      if (usableSegments.length === 0) {
+        throw new Error("No usable path could be built from the valid points.");
+      }
+
+      if (skippedPlacemarks > 0 && issues.length < 10) {
+        issues.push(`Skipped ${skippedPlacemarks} placemark(s) without valid points.`);
+      }
+      if (issues.length >= 10 && (removedInvalidPoints > 10 || skippedPlacemarks > 0)) {
+        issues.push("Additional malformed-point warnings were omitted.");
+      }
+
+      const lineStrings = usableSegments.map(segment => `
+            <LineString>
+              <tessellate>1</tessellate>
+              <altitudeMode>clampToGround</altitudeMode>
+              <coordinates>${segment.map(point => point.join(",")).join(" ")}</coordinates>
+            </LineString>`).join("");
+
+      // Use separate LineStrings for the two sides of the IDL. A single KML
+      // LineString would connect +180 directly to -180 across the globe.
       const updatedKML = `<?xml version="1.0" encoding="UTF-8"?>
         <kml xmlns="http://www.opengis.net/kml/2.2">
           <Document>
-		    <Placemark>
-			  <name>Simple Knot Line</name>
-			  <LineString>
-                <coordinates>${updatedPlacemarks.join(" ")}</coordinates>
-		      </LineString>
-			</Placemark>
+            <Placemark>
+              <name>Simple Knot Line</name>
+              <MultiGeometry>${lineStrings}
+              </MultiGeometry>
+            </Placemark>
           </Document>
         </kml>`;
 
       const modifiedFilename = `modified_${filename}`;
       addIntermediateKnotsAndExport(updatedKML, modifiedFilename);
+
+      return {
+        issues,
+        removedInvalidPoints,
+        removedAntipodalPoints: interpolated.removedAntipodalPoints
+      };
     }
 
     function addIntermediateKnotsAndExport(updatedKMLText, filename) {
       // Create a Blob containing the KML data
       const blob = new Blob([updatedKMLText], { type: "text/xml" });
+      const objectUrl = URL.createObjectURL(blob);
 
       // Create a link element to download the modified KML file
       const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
+      link.href = objectUrl;
       link.download = filename;
 
       // Programmatically click the link to trigger the download
+      document.body.appendChild(link);
       link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     }
 
   // Function to introduce a delay using a Promise
