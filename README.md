@@ -13,7 +13,6 @@ Features and benefits:
 - Processes multiple FR24 files in one batch and reports malformed or skipped points without stopping the rest of the batch.
 
 Notes/Caveats: 
-- It works 99% of the time (I have 150+ domestic/international flights processed and uploads to FOW), though there is a small edge case the processed file would fail to upload.
 - The processor assumes consecutive valid points belong to the same flight path. If the source contains a genuinely disconnected or very large gap, it will still treat the points as connected and insert approximately one point per kilometer along the great-circle route between them.
 * The processor now uses great-circle interpolation, so it takes the short geographic route when a flight crosses the International Date Line (IDL) between Alaska and Russia.
 * The output is split into separate KML line segments at the IDL so a renderer does not connect +180 to -180 across the globe.
