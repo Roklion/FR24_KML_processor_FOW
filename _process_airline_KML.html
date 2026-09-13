@@ -25,6 +25,47 @@
       const distance = earthRadius * c;
       return distance;
     }
+
+    // Return a point at fraction t along the great-circle route between two
+    // longitude/latitude pairs. Unlike arithmetic lon/lat interpolation, this
+    // correctly follows the Earth's curvature and crosses the IDL correctly.
+    function interpolateGreatCircle(coord1, coord2, t) {
+      const toRadians = degrees => degrees * (Math.PI / 180);
+      const toDegrees = radians => radians * (180 / Math.PI);
+
+      const lon1 = toRadians(coord1[0]);
+      const lat1 = toRadians(coord1[1]);
+      const lon2 = toRadians(coord2[0]);
+      const lat2 = toRadians(coord2[1]);
+
+      const x1 = Math.cos(lat1) * Math.cos(lon1);
+      const y1 = Math.cos(lat1) * Math.sin(lon1);
+      const z1 = Math.sin(lat1);
+      const x2 = Math.cos(lat2) * Math.cos(lon2);
+      const y2 = Math.cos(lat2) * Math.sin(lon2);
+      const z2 = Math.sin(lat2);
+
+      const dotProduct = Math.max(-1, Math.min(1, x1 * x2 + y1 * y2 + z1 * z2));
+      const angularDistance = Math.acos(dotProduct);
+
+      // Identical points do not have a defined interpolation direction.
+      if (angularDistance < 1e-12) {
+        return coord2;
+      }
+
+      const sinAngularDistance = Math.sin(angularDistance);
+      const weight1 = Math.sin((1 - t) * angularDistance) / sinAngularDistance;
+      const weight2 = Math.sin(t * angularDistance) / sinAngularDistance;
+
+      const x = weight1 * x1 + weight2 * x2;
+      const y = weight1 * y1 + weight2 * y2;
+      const z = weight1 * z1 + weight2 * z2;
+
+      const latitude = Math.atan2(z, Math.sqrt(x * x + y * y));
+      const longitude = Math.atan2(y, x);
+
+      return [toDegrees(longitude), toDegrees(latitude)];
+    }
 	
     // Function to handle dropped files
     async function handleFileDrop(event) {
@@ -101,14 +142,19 @@
         if (previousCoordinates !== null) {
           distanceMeters = calculateHaversineDistance(previousCoordinates, [longitude, latitude]);
       
-          // Add intermediate knots if needed
+          // Add points at approximately 1 km intervals along the
+          // great-circle route between the two coordinates.
           const numIntermediateKnots = Math.ceil(distanceMeters / 1000);
           for (let i = 1; i <= numIntermediateKnots; i++) {
             const fraction = i / (numIntermediateKnots);
-            const intermediateLongitude = previousCoordinates[0] + (longitude - previousCoordinates[0]) * fraction;
-            const intermediateLatitude = previousCoordinates[1] + (latitude - previousCoordinates[1]) * fraction;
-			
-			updatedPlacemarks.push(`${intermediateLongitude},${intermediateLatitude}`);
+            const [intermediateLongitude, intermediateLatitude] =
+              interpolateGreatCircle(
+                previousCoordinates,
+                [longitude, latitude],
+                fraction
+              );
+
+            updatedPlacemarks.push(`${intermediateLongitude},${intermediateLatitude}`);
           }
         } else {
 		  updatedPlacemarks.push(`${longitude},${latitude}`);
