@@ -5,6 +5,12 @@ Instruction:
 - Drag and drop original KML downloads from FR24
 - The script will automatically process and download each file. There might be a browser prompt to ask user to enable multiple-file download on Chrome.
 
+Features and benefits:
+- Fixes disconnected or overly sparse flight paths by adding points at approximately 1 km intervals between recorded positions.
+- Handles paths crossing the International Date Line without creating a line across the globe by splitting the output into separate KML line segments.
+- Reduces the information load for Fog of World (FOW) and FOW Eraser by converting verbose FR24 placemarks, descriptions, styles, folders, timestamps, and altitude data into a lightweight 2D path.
+- Processes multiple FR24 files in one batch and reports malformed or skipped points without stopping the rest of the batch.
+
 Notes/Caveats: 
 - It works 99% of the time (I have 150+ domestic/international flights processed and uploads to FOW), though there is a small edge case the processed file would fail to upload.
 * The processor now uses great-circle interpolation, so it takes the short geographic route when a flight crosses the International Date Line (IDL) between Alaska and Russia.
