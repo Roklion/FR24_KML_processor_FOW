@@ -1,4 +1,4 @@
-The script was created based on https://sspai.com/post/38942
+Originally based on https://sspai.com/post/38942
 
 Instruction: 
 - Open directly using a browser (I've only tested Chrome)
