@@ -18,5 +18,4 @@ Notes/Caveats:
 * The output is split into separate KML line segments at the IDL so a renderer does not connect +180 to -180 across the globe.
 * The processor reads all coordinate tuples in each placemark, removes malformed points, and displays warnings for removed or skipped data.
 * Altitude values in the source are currently ignored; output is a 2D ground track.
-* FOW may still display a path as "broken" near the IDL if it handles multiple line segments or longitude wrapping differently from the KML. One test case was a JL3 flight from JFK to HND, for which the original unprocessed file could be uploaded to FOW.
 
