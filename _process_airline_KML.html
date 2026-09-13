@@ -10,21 +10,32 @@
   </div>
   <ul id="knotsList"></ul>
   <script>
+    const EARTH_RADIUS_METERS = 6371000;
     const SAMPLE_INTERVAL_METERS = 1000;
+    const MAX_DISPLAYED_ISSUES = 10;
+    const DEGREES_TO_RADIANS = Math.PI / 180;
+    const RADIANS_TO_DEGREES = 180 / Math.PI;
+
+    function toRadians(degrees) {
+      return degrees * DEGREES_TO_RADIANS;
+    }
+
+    function toDegrees(radians) {
+      return radians * RADIANS_TO_DEGREES;
+    }
 
     function calculateHaversineDistance(coord1, coord2) {
       const [lon1, lat1] = coord1;
       const [lon2, lat2] = coord2;
-      const earthRadius = 6371000; // Radius of Earth in meters
-      const dLat = (lat2 - lat1) * (Math.PI / 180);
-      const dLon = (lon2 - lon1) * (Math.PI / 180);
+      const dLat = toRadians(lat2 - lat1);
+      const dLon = toRadians(lon2 - lon1);
       const a = Math.min(1,
         Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+        Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) *
         Math.sin(dLon / 2) * Math.sin(dLon / 2)
       );
       const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      const distance = earthRadius * c;
+      const distance = EARTH_RADIUS_METERS * c;
       return distance;
     }
 
@@ -44,7 +55,7 @@
       const invalidTokens = [];
       const tokens = coordinatesText.trim().split(/\s+/).filter(Boolean);
 
-      tokens.forEach((token, index) => {
+      tokens.forEach(token => {
         const fields = token.split(",");
         const longitude = Number(fields[0]);
         const latitude = Number(fields[1]);
@@ -58,7 +69,7 @@
           latitude < -90 ||
           latitude > 90
         ) {
-          invalidTokens.push({ token, index });
+          invalidTokens.push(token);
           return;
         }
 
@@ -74,9 +85,6 @@
     // longitude/latitude pairs. Unlike arithmetic lon/lat interpolation, this
     // correctly follows the Earth's curvature and crosses the IDL correctly.
     function interpolateGreatCircle(coord1, coord2, t) {
-      const toRadians = degrees => degrees * (Math.PI / 180);
-      const toDegrees = radians => radians * (180 / Math.PI);
-
       const lon1 = toRadians(coord1[0]);
       const lat1 = toRadians(coord1[1]);
       const lon2 = toRadians(coord2[0]);
@@ -217,34 +225,37 @@
 
       dropZone.innerHTML = "Processing...";
       knotsList.innerHTML = "";
-      let count = 0;
+      let fileNumber = 0;
 
       for (const file of files) {
+        fileNumber++;
         try {
           const kmlText = await readFileAsText(file);
           const xmlDocument = new DOMParser().parseFromString(kmlText, "text/xml");
 
           const result = processKML(xmlDocument, file.name);
-          count++;
 
-          let message = `${count}. Processed: ${file.name}`;
+          let message = `${fileNumber}. Processed: ${file.name}`;
           if (result.removedInvalidPoints > 0) {
             message += ` (removed ${result.removedInvalidPoints} invalid point(s))`;
           }
           if (result.removedAntipodalPoints > 0) {
             message += ` (removed ${result.removedAntipodalPoints} unstable point(s))`;
           }
-          addStatusMessage(message, false);
+          addStatusMessage(message, "success");
 
           if (result.issues.length > 0) {
-            addStatusMessage(`Warning: ${file.name} — ${result.issues[0]}`, false, true);
+            addStatusMessage(`Warning: ${file.name} — ${result.issues[0]}`, "warning");
           }
 
           result.issues.forEach(issue => console.warn(`${file.name}: ${issue}`));
           await wait(200);
         } catch (error) {
           console.error(`Error while processing ${file.name}:`, error);
-          addStatusMessage(`Error: ${file.name} — ${error.message}`, true);
+          addStatusMessage(
+            `${fileNumber}. Error: ${file.name} — ${error.message}`,
+            "error"
+          );
         }
       }
 
@@ -252,12 +263,12 @@
       dropZone.style.background = "none";
     }
 
-    function addStatusMessage(message, isError, isWarning) {
+    function addStatusMessage(message, status) {
       const listItem = document.createElement("li");
       listItem.textContent = message;
-      if (isError) {
+      if (status === "error") {
         listItem.style.color = "#b00020";
-      } else if (isWarning) {
+      } else if (status === "warning") {
         listItem.style.color = "#8a5a00";
       }
       document.getElementById("knotsList").appendChild(listItem);
@@ -296,7 +307,7 @@
         .forEach(routeFolder => routeFolder.remove());
 
       const placemarks = getElementsByLocalName(xmlDocument, "Placemark");
-      const coordinates = [];
+      const trackCoordinates = [];
 
       placemarks.forEach((placemark, placemarkIndex) => {
         const coordinateElements = getElementsByLocalName(placemark, "coordinates");
@@ -311,24 +322,24 @@
         coordinateElements.forEach(coordinatesElement => {
           const parsed = parseCoordinateText(coordinatesElement.textContent);
 
-          parsed.invalidTokens.forEach(invalid => {
+          parsed.invalidTokens.forEach(invalidToken => {
             removedInvalidPoints++;
-            if (issues.length < 10) {
+            if (issues.length < MAX_DISPLAYED_ISSUES) {
               issues.push(
                 `Placemark ${placemarkIndex + 1} has an invalid coordinate ` +
-                `(${invalid.token}). That point was removed.`
+                `(${invalidToken}). That point was removed.`
               );
             }
           });
 
           parsed.points.forEach(point => {
-            const previousPoint = coordinates[coordinates.length - 1];
+            const previousPoint = trackCoordinates[trackCoordinates.length - 1];
             const isDuplicate = previousPoint &&
               previousPoint[0] === point[0] &&
               previousPoint[1] === point[1];
 
             if (!isDuplicate) {
-              coordinates.push(point);
+              trackCoordinates.push(point);
               validPointsInPlacemark++;
             }
           });
@@ -336,17 +347,17 @@
 
         if (validPointsInPlacemark === 0) {
           skippedPlacemarks++;
-          if (issues.length < 10) {
+          if (issues.length < MAX_DISPLAYED_ISSUES) {
             issues.push(`Placemark ${placemarkIndex + 1} has no valid coordinates.`);
           }
         }
       });
 
-      if (coordinates.length < 2) {
+      if (trackCoordinates.length < 2) {
         throw new Error("The file does not contain at least two valid path points.");
       }
 
-      const interpolated = buildInterpolatedSegments(coordinates);
+      const interpolated = buildInterpolatedSegments(trackCoordinates);
       const usableSegments = interpolated.segments.filter(
         segment => segment.length >= 2
       );
@@ -355,10 +366,13 @@
         throw new Error("No usable path could be built from the valid points.");
       }
 
-      if (skippedPlacemarks > 0 && issues.length < 10) {
+      if (skippedPlacemarks > 0 && issues.length < MAX_DISPLAYED_ISSUES) {
         issues.push(`Skipped ${skippedPlacemarks} placemark(s) without valid points.`);
       }
-      if (issues.length >= 10 && (removedInvalidPoints > 10 || skippedPlacemarks > 0)) {
+      if (
+        issues.length >= MAX_DISPLAYED_ISSUES &&
+        (removedInvalidPoints > MAX_DISPLAYED_ISSUES || skippedPlacemarks > 0)
+      ) {
         issues.push("Additional malformed-point warnings were omitted.");
       }
 
@@ -383,7 +397,7 @@
         </kml>`;
 
       const modifiedFilename = `modified_${filename}`;
-      addIntermediateKnotsAndExport(updatedKML, modifiedFilename);
+      downloadKML(updatedKML, modifiedFilename);
 
       return {
         issues,
@@ -392,7 +406,7 @@
       };
     }
 
-    function addIntermediateKnotsAndExport(updatedKMLText, filename) {
+    function downloadKML(updatedKMLText, filename) {
       // Create a Blob containing the KML data
       const blob = new Blob([updatedKMLText], { type: "text/xml" });
       const objectUrl = URL.createObjectURL(blob);
